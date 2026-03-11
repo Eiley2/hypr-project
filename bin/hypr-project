@@ -1,13 +1,14 @@
 #!/bin/bash
 
-SCREENS=3
+MIN_SCREENS=3
 BLOCK=10
 STATE_DIR="$HOME/.cache/hypr-projects"
 PROJECTS_FILE="$STATE_DIR/projects"
 CURRENT_FILE="$STATE_DIR/current"
+NAMES_FILE="$STATE_DIR/window-names"
 
 mkdir -p "$STATE_DIR"
-touch "$PROJECTS_FILE"
+touch "$PROJECTS_FILE" "$NAMES_FILE"
 
 get_current() {
     cat "$CURRENT_FILE" 2>/dev/null
@@ -62,7 +63,7 @@ activate_project() {
         for i in "${!monitors[@]}"; do
             local ws=$((start + i))
             local mon="${monitors[$i]}"
-            [ "$i" -ge "$SCREENS" ] && break
+            [ "$i" -ge "$BLOCK" ] && break
             batch+="dispatch focusmonitor ${mon}; dispatch workspace ${ws}; "
         done
 
@@ -228,6 +229,92 @@ case "$1" in
         get_current
         ;;
 
+    name)
+        # Name the focused window
+        addr=$(hyprctl -j activewindow 2>/dev/null | jq -r '.address' 2>/dev/null)
+        [ -z "$addr" ] || [ "$addr" = "null" ] && exit 1
+
+        current_name=""
+        if [ -f "$NAMES_FILE" ]; then
+            current_name=$(grep "^${addr}	" "$NAMES_FILE" | cut -f2)
+        fi
+
+        new_name="${2:-$(walker -d -I -p "  Name window:" 2>/dev/null)}"
+        new_name=$(echo "$new_name" | xargs)
+        [ -z "$new_name" ] && exit 0
+
+        # Remove old entry if exists, add new
+        tmp=$(mktemp)
+        grep -v "^${addr}	" "$NAMES_FILE" > "$tmp" 2>/dev/null
+        printf '%s\t%s\n' "$addr" "$new_name" >> "$tmp"
+        mv "$tmp" "$NAMES_FILE"
+        signal_waybar
+        ;;
+
+    find)
+        # Fuzzy search all windows across all projects
+        # Build list: "custom_name | app_title · project (screen N)"
+        items=""
+        while IFS= read -r line; do
+            addr=$(echo "$line" | jq -r '.address')
+            title=$(echo "$line" | jq -r '.title' | cut -c1-60)
+            class=$(echo "$line" | jq -r '.class')
+            ws_id=$(echo "$line" | jq -r '.workspace.id')
+
+            # Find which project this workspace belongs to
+            proj_name=""
+            screen_num=""
+            while IFS=$'\t' read -r pname pstart; do
+                pend=$((pstart + BLOCK - 1))
+                if [ "$ws_id" -ge "$pstart" ] && [ "$ws_id" -le "$pend" ]; then
+                    proj_name="$pname"
+                    screen_num=$((ws_id - pstart + 1))
+                    break
+                fi
+            done < "$PROJECTS_FILE"
+
+            [ -z "$proj_name" ] && proj_name="untracked" && screen_num="$ws_id"
+
+            # Check for custom name
+            custom_name=""
+            if [ -f "$NAMES_FILE" ]; then
+                custom_name=$(grep "^${addr}	" "$NAMES_FILE" | cut -f2)
+            fi
+
+            display_name="${custom_name:-$class}"
+            items+="${display_name} | ${title} · ${proj_name} screen ${screen_num}\n"
+        done < <(hyprctl -j clients 2>/dev/null | jq -c '.[]')
+
+        [ -z "$items" ] && exit 0
+
+        choice=$(printf "%b" "$items" | walker -d -p "  Find window:")
+        [ -z "$choice" ] && exit 0
+
+        # Extract project and screen from the choice
+        proj=$(echo "$choice" | grep -oP '· \K[^ ]+(?= screen)')
+        scr=$(echo "$choice" | grep -oP 'screen \K[0-9]+')
+
+        if [ -n "$proj" ] && [ -n "$scr" ]; then
+            # Switch all monitors to the target project
+            activate_project "$proj"
+
+            # Then go to the specific screen and focus the window
+            proj_start=$(get_start "$proj")
+            if [ -n "$proj_start" ]; then
+                ws=$((proj_start + scr - 1))
+                hyprctl dispatch workspace "$ws" > /dev/null
+
+                # Find and focus the matching window by title from choice
+                win_title=$(echo "$choice" | sed 's/^[^|]*| //' | sed 's/ · .*//')
+                hyprctl -j clients | jq -r \
+                    ".[] | select(.workspace.id == $ws) | select(.title | startswith(\"$(echo "$win_title" | sed 's/"/\\"/g' | head -c30)\")) | .address" | \
+                    head -1 | xargs -I{} hyprctl dispatch focuswindow "address:{}" > /dev/null 2>&1
+
+                signal_waybar
+            fi
+        fi
+        ;;
+
     waybar)
         sync_from_workspace
         current=$(get_current)
@@ -246,18 +333,24 @@ case "$1" in
             screen=0
         fi
 
-        # Build dots: ● active, ◆ has windows, ○ empty
+        # Dynamic dots: show at least MIN_SCREENS, expand if more are occupied
         occupied=$(hyprctl -j workspaces 2>/dev/null | jq -r \
             "[.[] | select(.id >= $start and .id < ($start + $BLOCK)) | .id - $start + 1] | .[]" 2>/dev/null)
 
+        max_screen=$MIN_SCREENS
+        for s in $occupied; do
+            [ "$s" -gt "$max_screen" ] && max_screen="$s"
+        done
+        [ "$screen" -gt "$max_screen" ] && max_screen="$screen"
+
         dots=""
-        for i in $(seq 1 $SCREENS); do
+        for i in $(seq 1 $max_screen); do
             if [ "$i" -eq "$screen" ]; then
-                dots+=" ●"
+                dots+=" 󰮯"
             elif echo "$occupied" | grep -qx "$i"; then
-                dots+=" ◆"
+                dots+=" 󰊠"
             else
-                dots+=" ○"
+                dots+=" 󰧟"
             fi
         done
 
@@ -265,11 +358,11 @@ case "$1" in
         current_esc=$(echo "$current" | sed 's/"/\\"/g')
 
         printf '{"text": "%s%s", "tooltip": "%s  (%s projects)\\nScreen %d of %d\\n\\nClick: switch | Right-click: new | Middle: close\\nScroll: cycle projects", "class": "active"}\n' \
-            "$current_esc" "$dots" "$current_esc" "$count" "$screen" "$SCREENS"
+            "$current_esc" "$dots" "$current_esc" "$count" "$screen" "$max_screen"
         ;;
 
     *)
-        echo "Usage: hypr-project {create|switch|go|move|close|next|prev|list|current|waybar} [args]"
+        echo "Usage: hypr-project {create|switch|go|move|close|next|prev|name|find|list|current|waybar} [args]"
         exit 1
         ;;
 esac
