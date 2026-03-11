@@ -275,10 +275,39 @@ def build_entries():
             if custom_name and title_display and title_display != custom_name:
                 window_text = f"{window_text} · {title_display}"
 
-            def current_action_payload(target_name):
+            def current_action_payload(verb, target_name=""):
                 return encode_payload(
-                    ["move-project", current_client["address"], str(current_client["ws_id"]), project_name, target_name]
+                    [verb, current_client["address"], str(current_client["ws_id"]), project_name, target_name]
                 )
+
+            current_window_actions.extend(
+                [
+                    {
+                        "Text": f"{project_text} · Close current window",
+                        "Subtext": window_text,
+                        "Value": f"window-action:{current_action_payload('close')}",
+                        "Icon": desktop_icon.get(desktop, "window-close"),
+                        "_project": project_name,
+                        "_type_rank": 1,
+                    },
+                    {
+                        "Text": f"{project_text} · Toggle current window floating",
+                        "Subtext": window_text,
+                        "Value": f"window-action:{current_action_payload('float')}",
+                        "Icon": desktop_icon.get(desktop, "preferences-system-windows"),
+                        "_project": project_name,
+                        "_type_rank": 1,
+                    },
+                    {
+                        "Text": f"{project_text} · Toggle current window fullscreen",
+                        "Subtext": window_text,
+                        "Value": f"window-action:{current_action_payload('fullscreen')}",
+                        "Icon": desktop_icon.get(desktop, "view-fullscreen"),
+                        "_project": project_name,
+                        "_type_rank": 1,
+                    },
+                ]
+            )
 
             for target_name, _ in projects:
                 if target_name == project_name:
@@ -288,7 +317,7 @@ def build_entries():
                     {
                         "Text": f"{target_text} · Move current window",
                         "Subtext": f"{window_text} · keep screen {screen_num}",
-                        "Value": f"window-action:{current_action_payload(target_name)}",
+                        "Value": f"window-action:{current_action_payload('move-project', target_name)}",
                         "Icon": "folder-move",
                         "_project": project_name,
                         "_type_rank": 1,
@@ -296,52 +325,6 @@ def build_entries():
                 )
 
     current_window_actions.sort(key=lambda entry: usage_sort_key(entry, usage, current_project))
-
-    window_action_entries = []
-    for client in clients:
-        project_name, screen_num = locate_project(client["ws_id"], projects)
-        project_text = project_label(project_name, project_icons)
-        desktop = resolve_desktop_for_class(client["class"], desktop_by_key)
-        app_display_name = desktop_name.get(desktop) or client["class"]
-        title_display = client["title"] or app_display_name
-        custom_name = custom_names.get(client["address"], "").strip()
-        window_text = f"{project_text} · {custom_name}" if custom_name else f"{project_text} · {title_display}"
-        if custom_name and title_display and title_display != custom_name:
-            window_text = f"{window_text} · {title_display}"
-
-        def action_payload(verb, target=""):
-            return encode_payload([verb, client["address"], str(client["ws_id"]), project_name, target])
-
-        window_action_entries.extend(
-            [
-                {
-                    "Text": f"Close window · {window_text}",
-                    "Subtext": "Window action",
-                    "Value": f"window-action:{action_payload('close')}",
-                    "Icon": desktop_icon.get(desktop, "window-close"),
-                    "_project": project_name,
-                    "_type_rank": 2,
-                },
-                {
-                    "Text": f"Toggle floating · {window_text}",
-                    "Subtext": "Window action",
-                    "Value": f"window-action:{action_payload('float')}",
-                    "Icon": desktop_icon.get(desktop, "preferences-system-windows"),
-                    "_project": project_name,
-                    "_type_rank": 2,
-                },
-                {
-                    "Text": f"Toggle fullscreen · {window_text}",
-                    "Subtext": "Window action",
-                    "Value": f"window-action:{action_payload('fullscreen')}",
-                    "Icon": desktop_icon.get(desktop, "view-fullscreen"),
-                    "_project": project_name,
-                    "_type_rank": 2,
-                },
-            ]
-        )
-
-    window_action_entries.sort(key=lambda entry: usage_sort_key(entry, usage, current_project))
 
     app_entries = []
     for app in apps:
@@ -358,7 +341,7 @@ def build_entries():
 
     app_entries.sort(key=lambda entry: usage_sort_key(entry, usage, current_project))
 
-    entries = window_entries + project_entries + general_actions + current_window_actions + window_action_entries + app_entries
+    entries = window_entries + project_entries + general_actions + current_window_actions + app_entries
     for entry in entries:
         for key in [key for key in entry if key.startswith("_")]:
             entry.pop(key, None)
