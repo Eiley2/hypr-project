@@ -28,10 +28,13 @@ work ● ◆ ○
 - [Hyprland](https://hyprland.org/)
 - [Waybar](https://github.com/Alexays/Waybar)
 - [Walker](https://github.com/abenz1267/walker) (for project picker dialogs)
+- [Elephant](https://github.com/abenz1267/elephant) (for the native spotlight menu)
 - `jq`
 - `bash`
+- `python3`
 
 Works great with [Omarchy](https://omarchy.org/).
+`SUPER + ALT + F` uses a native Walker/Elephant menu, so it shows real icons and opens without the old `dmenu` delay.
 
 ## Install
 
@@ -58,6 +61,7 @@ bash uninstall.sh
 | `SUPER + ALT + N` | Create new project (walker dialog) |
 | `SUPER + ALT + P` | Switch project (walker picker) |
 | `SUPER + ALT + W` | Close current project |
+| `SUPER + ALT + F` | Spotlight for windows, apps, projects, and actions |
 
 ## Waybar interactions
 
@@ -81,6 +85,7 @@ hypr-project prev                  # Previous project
 hypr-project close                 # Close current project
 hypr-project list                  # List all projects
 hypr-project current               # Print current project name
+hypr-project find                  # Open native spotlight menu
 ```
 
 ## Configuration

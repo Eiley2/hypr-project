@@ -22,14 +22,22 @@ backup() {
 info "Installing hypr-project to ~/.local/bin/"
 mkdir -p ~/.local/bin
 cp "$SCRIPT_DIR/bin/hypr-project" ~/.local/bin/hypr-project
+cp "$SCRIPT_DIR/bin/hypr-project-menu-json" ~/.local/bin/hypr-project-menu-json
 chmod +x ~/.local/bin/hypr-project
+chmod +x ~/.local/bin/hypr-project-menu-json
 ok "Script installed"
 
-# --- 2. Create state directory ---
+# --- 2. Install Elephant menu ---
+info "Installing Walker/Elephant spotlight menu"
+mkdir -p ~/.config/elephant/menus
+cp "$SCRIPT_DIR/config/elephant/menus/hyprspotlight.lua" ~/.config/elephant/menus/hyprspotlight.lua
+ok "Elephant menu installed"
+
+# --- 3. Create state directory ---
 mkdir -p ~/.cache/hypr-projects
 touch ~/.cache/hypr-projects/projects
 
-# --- 3. Patch Hyprland bindings ---
+# --- 4. Patch Hyprland bindings ---
 BINDINGS_FILE="$HOME/.config/hypr/bindings.conf"
 if [ -f "$BINDINGS_FILE" ] && grep -q "$MARKER" "$BINDINGS_FILE"; then
     warn "Hyprland bindings already patched, skipping"
@@ -45,7 +53,7 @@ else
     ok "Hyprland bindings patched"
 fi
 
-# --- 4. Patch Waybar config ---
+# --- 5. Patch Waybar config ---
 WAYBAR_CONFIG="$HOME/.config/waybar/config.jsonc"
 if [ -f "$WAYBAR_CONFIG" ] && grep -q '"custom/project"' "$WAYBAR_CONFIG"; then
     warn "Waybar config already has custom/project, skipping"
@@ -102,7 +110,7 @@ else
     ok "Waybar module definition added"
 fi
 
-# --- 5. Patch Waybar CSS ---
+# --- 6. Patch Waybar CSS ---
 WAYBAR_STYLE="$HOME/.config/waybar/style.css"
 if [ -f "$WAYBAR_STYLE" ] && grep -q '#custom-project' "$WAYBAR_STYLE"; then
     warn "Waybar CSS already patched, skipping"
@@ -118,7 +126,13 @@ else
     ok "Waybar CSS patched"
 fi
 
-# --- 6. Restart waybar ---
+# --- 7. Restart walker/elephant ---
+if command -v omarchy-restart-walker &>/dev/null; then
+    info "Restarting walker/elephant..."
+    omarchy-restart-walker
+fi
+
+# --- 8. Restart waybar ---
 if command -v omarchy-restart-waybar &>/dev/null; then
     info "Restarting waybar..."
     omarchy-restart-waybar

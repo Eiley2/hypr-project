@@ -1,0 +1,232 @@
+#!/usr/bin/env python3
+
+import base64
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+HOME = Path.home()
+STATE_DIR = HOME / ".cache" / "hypr-projects"
+PROJECTS_FILE = STATE_DIR / "projects"
+NAMES_FILE = STATE_DIR / "window-names"
+APPS_CACHE = STATE_DIR / "apps-cache.tsv"
+LUA_CACHE = STATE_DIR / "hyprspotlight.lua"
+BLOCK = 10
+
+
+def normalize(value: str) -> str:
+    return "".join(ch.lower() for ch in value if ch.isalnum())
+
+
+def encode_payload(parts):
+    raw = "\t".join(parts).encode()
+    return base64.b64encode(raw).decode()
+
+
+def load_projects():
+    projects = []
+    if PROJECTS_FILE.exists():
+        for line in PROJECTS_FILE.read_text().splitlines():
+            if not line.strip():
+                continue
+            name, start = line.split("\t", 1)
+            projects.append((name, int(start)))
+    return projects
+
+
+def load_custom_names():
+    names = {}
+    if NAMES_FILE.exists():
+        for line in NAMES_FILE.read_text().splitlines():
+            if not line.strip():
+                continue
+            addr, name = line.split("\t", 1)
+            names[addr] = name
+    return names
+
+
+def desktop_keys(desktop_path: str, app_name: str, startup_wmclass: str):
+    desktop_id = Path(desktop_path).stem
+    return [startup_wmclass, desktop_id, desktop_id.split(".")[-1], app_name]
+
+
+def load_apps():
+    apps = []
+    desktop_by_key = {}
+    desktop_icon = {}
+    desktop_name = {}
+    if not APPS_CACHE.exists():
+        return apps, desktop_by_key, desktop_icon, desktop_name
+
+    for line in APPS_CACHE.read_text().splitlines():
+        if not line.strip():
+            continue
+        app_name, startup, icon_name, desktop = (line.split("\t", 3) + ["", "", "", ""])[:4]
+        entry = {
+            "name": app_name,
+            "startup": startup,
+            "icon": icon_name or "application-x-executable",
+            "desktop": desktop,
+        }
+        apps.append(entry)
+        desktop_icon[desktop] = entry["icon"]
+        desktop_name[desktop] = entry["name"]
+        for key in desktop_keys(desktop, app_name, startup):
+            norm = normalize(key)
+            if norm and norm not in desktop_by_key:
+                desktop_by_key[norm] = desktop
+    return apps, desktop_by_key, desktop_icon, desktop_name
+
+
+def load_clients():
+    raw = subprocess.check_output(["hyprctl", "-j", "clients"], text=True)
+    clients = json.loads(raw)
+    return [
+        {
+            "address": client.get("address", ""),
+            "title": (client.get("title") or "")[:80],
+            "class": client.get("class") or "",
+            "ws_id": int((client.get("workspace") or {}).get("id") or 0),
+        }
+        for client in clients
+    ]
+
+
+def running_class_keys(clients):
+    keys = set()
+    for client in clients:
+        raw = client["class"]
+        for candidate in (raw, raw.split(".")[-1], raw.split("/")[-1]):
+            norm = normalize(candidate)
+            if norm:
+                keys.add(norm)
+    return keys
+
+
+def locate_project(workspace_id: int, projects):
+    for name, start in projects:
+        end = start + BLOCK - 1
+        if start <= workspace_id <= end:
+            return name, workspace_id - start + 1
+    return "untracked", workspace_id
+
+
+def resolve_desktop_for_class(class_name: str, desktop_by_key):
+    for candidate in (class_name, class_name.split(".")[-1], class_name.split("/")[-1]):
+        norm = normalize(candidate)
+        if norm and norm in desktop_by_key:
+            return desktop_by_key[norm]
+    return ""
+
+
+def build_entries():
+    projects = load_projects()
+    custom_names = load_custom_names()
+    apps, desktop_by_key, desktop_icon, desktop_name = load_apps()
+    clients = load_clients()
+    running_keys = running_class_keys(clients)
+    open_desktops = set()
+
+    project_counts = {name: 0 for name, _ in projects}
+    for client in clients:
+        project_name, _ = locate_project(client["ws_id"], projects)
+        if project_name in project_counts:
+            project_counts[project_name] += 1
+
+    entries = []
+
+    for client in clients:
+        project_name, screen_num = locate_project(client["ws_id"], projects)
+        desktop = resolve_desktop_for_class(client["class"], desktop_by_key)
+        if desktop:
+            open_desktops.add(desktop)
+        app_display_name = desktop_name.get(desktop) or client["class"]
+        display_name = custom_names.get(client["address"]) or app_display_name
+        title_display = client["title"] or display_name
+        payload = encode_payload([client["address"], str(client["ws_id"]), project_name])
+        entries.append(
+            {
+                "Text": f"{project_name} · {title_display}",
+                "Subtext": f"{display_name} · screen {screen_num}",
+                "Value": f"window:{payload}",
+                "Icon": desktop_icon.get(desktop, "application-x-executable"),
+            }
+        )
+
+    for app in apps:
+        payload = base64.b64encode(app["desktop"].encode()).decode()
+        is_open = app["desktop"] in open_desktops or any(
+            key and key in running_keys for key in (normalize(candidate) for candidate in desktop_keys(app["desktop"], app["name"], app["startup"]))
+        )
+        entries.append(
+            {
+                "Text": app["name"],
+                "Subtext": "Open now · launch another instance" if is_open else "Application",
+                "Value": f"app:{payload}",
+                "Icon": app["icon"],
+                "_rank": 1 if is_open else 2,
+            }
+        )
+
+    window_count = len(clients)
+    for index, entry in enumerate(entries[:window_count]):
+        entry["_rank"] = 0
+
+    app_entries = entries[window_count:]
+    app_entries.sort(key=lambda entry: (entry["_rank"], entry["Text"].lower()))
+    entries = entries[:window_count] + app_entries
+    for entry in entries:
+        entry.pop("_rank", None)
+
+    for name, _start in projects:
+        payload = base64.b64encode(name.encode()).decode()
+        entries.append(
+            {
+                "Text": name,
+                "Subtext": f'{project_counts.get(name, 0)} windows',
+                "Value": f"project:{payload}",
+                "Icon": "folder",
+            }
+        )
+
+    entries.extend(
+        [
+            {"Text": "New project", "Subtext": "Create and switch", "Value": "action:create", "Icon": "folder-new"},
+            {"Text": "Name current window", "Subtext": "Set custom label", "Value": "action:name", "Icon": "edit-rename"},
+            {"Text": "Focus mode", "Subtext": "Laptop only", "Value": "action:focus-mode", "Icon": "preferences-desktop-display"},
+            {"Text": "All screens on", "Subtext": "Enable all monitors", "Value": "action:all-screens", "Icon": "video-display"},
+            {"Text": "Screen toggle menu", "Subtext": "Monitor controls", "Value": "action:screen-menu", "Icon": "video-joined-displays"},
+        ]
+    )
+
+    return entries
+
+
+def lua_quote(value: str) -> str:
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") + "'"
+
+
+def emit_lua(entries):
+    chunks = ["{"]
+    for entry in entries:
+        parts = ["{"]
+        for key in ("Text", "Subtext", "Value", "Icon"):
+            if key in entry and entry[key] is not None:
+                parts.append(f"{key}={lua_quote(str(entry[key]))},")
+        parts.append("},")
+        chunks.append("".join(parts))
+    chunks.append("}")
+    return "".join(chunks)
+
+
+entries = build_entries()
+if len(sys.argv) > 1 and sys.argv[1] == "--lua":
+    print(emit_lua(entries))
+elif len(sys.argv) > 1 and sys.argv[1] == "--lua-file":
+    LUA_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    LUA_CACHE.write_text("return " + emit_lua(entries))
+    print(str(LUA_CACHE))
+else:
+    print(json.dumps(entries, separators=(",", ":")))

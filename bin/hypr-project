@@ -6,6 +6,7 @@ STATE_DIR="$HOME/.cache/hypr-projects"
 PROJECTS_FILE="$STATE_DIR/projects"
 CURRENT_FILE="$STATE_DIR/current"
 NAMES_FILE="$STATE_DIR/window-names"
+APPS_CACHE="$STATE_DIR/apps-cache.tsv"
 
 mkdir -p "$STATE_DIR"
 touch "$PROJECTS_FILE" "$NAMES_FILE"
@@ -35,6 +36,113 @@ next_start() {
 
 signal_waybar() {
     pkill -RTMIN+11 waybar 2>/dev/null
+}
+
+normalize_id() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]'
+}
+
+build_apps_cache() {
+    local tmp
+    local desktop
+
+    tmp=$(mktemp)
+
+    for desktop in /usr/share/applications/*.desktop "$HOME"/.local/share/applications/*.desktop; do
+        [ -f "$desktop" ] || continue
+        awk -F= -v desktop="$desktop" '
+            /^\[Desktop Entry\]$/ { in_entry=1; next }
+            /^\[/ && $0 != "[Desktop Entry]" { in_entry=0 }
+            !in_entry { next }
+            /^Name=/ && name == "" { name=substr($0, 6) }
+            /^StartupWMClass=/ && startup == "" { startup=substr($0, 16) }
+            /^Icon=/ && icon == "" { icon=substr($0, 6) }
+            /^NoDisplay=/ && nodisplay == "" { nodisplay=tolower(substr($0, 11)) }
+            /^Hidden=/ && hidden == "" { hidden=tolower(substr($0, 8)) }
+            END {
+                if (name != "" && nodisplay != "true" && hidden != "true") {
+                    printf "%s\t%s\t%s\t%s\n", name, startup, icon, desktop
+                }
+            }
+        ' "$desktop" >> "$tmp"
+    done
+
+    sort -u "$tmp" -o "$tmp"
+    mv "$tmp" "$APPS_CACHE"
+}
+
+ensure_apps_cache() {
+    if [ ! -f "$APPS_CACHE" ]; then
+        build_apps_cache
+        return
+    fi
+
+    if ! awk -F'\t' 'NR == 1 { exit(NF < 4 ? 0 : 1) }' "$APPS_CACHE"; then
+        :
+    else
+        build_apps_cache
+        return
+    fi
+
+    if find /usr/share/applications "$HOME"/.local/share/applications -maxdepth 1 -type f -name '*.desktop' -newer "$APPS_CACHE" -print -quit 2>/dev/null | grep -q .; then
+        build_apps_cache
+    fi
+}
+
+menu_payload_decode() {
+    printf '%s' "$1" | base64 -d
+}
+
+menu_build_json() {
+    ensure_apps_cache
+    "$HOME/.local/bin/hypr-project-menu-json"
+}
+
+menu_open_value() {
+    local raw="$1"
+    local kind="${raw%%:*}"
+    local payload="${raw#*:}"
+    local decoded
+    local addr
+    local ws
+    local proj
+    local desktop_file
+    local action
+
+    case "$kind" in
+        window)
+            decoded=$(menu_payload_decode "$payload")
+            IFS=$'\t' read -r addr ws proj <<< "$decoded"
+            [ -z "$addr" ] && exit 1
+            [ -n "$proj" ] && [ "$proj" != "untracked" ] && activate_project "$proj"
+            [ -n "$ws" ] && hyprctl dispatch workspace "$ws" > /dev/null
+            hyprctl dispatch focuswindow "address:${addr}" > /dev/null 2>&1
+            signal_waybar
+            ;;
+        app)
+            desktop_file=$(menu_payload_decode "$payload")
+            [ -z "$desktop_file" ] && exit 1
+            if [ -f "$desktop_file" ]; then
+                exec_line=$(grep -m1 "^Exec=" "$desktop_file" | cut -d= -f2- | sed 's/ %[fFuU]//g')
+                uwsm app -- $exec_line &disown 2>/dev/null
+            fi
+            ;;
+        project)
+            proj=$(menu_payload_decode "$payload")
+            [ -z "$proj" ] && exit 1
+            activate_project "$proj"
+            ;;
+        action)
+            action="$payload"
+            case "$action" in
+                create)       "$0" create ;;
+                name)         "$0" name ;;
+                focus-mode)   hypr-screens solo ;;
+                all-screens)  hypr-screens all ;;
+                screen-menu)  hypr-screens menu ;;
+            esac
+            ;;
+    esac
 }
 
 # Switch all monitors to a project's screens (monitor 1→screen 1, monitor 2→screen 2, etc.)
@@ -252,67 +360,16 @@ case "$1" in
         ;;
 
     find)
-        # Fuzzy search all windows across all projects
-        # Build list: "custom_name | app_title · project (screen N)"
-        items=""
-        while IFS= read -r line; do
-            addr=$(echo "$line" | jq -r '.address')
-            title=$(echo "$line" | jq -r '.title' | cut -c1-60)
-            class=$(echo "$line" | jq -r '.class')
-            ws_id=$(echo "$line" | jq -r '.workspace.id')
+        omarchy-launch-walker -m menus:hyprspotlight
+        ;;
 
-            # Find which project this workspace belongs to
-            proj_name=""
-            screen_num=""
-            while IFS=$'\t' read -r pname pstart; do
-                pend=$((pstart + BLOCK - 1))
-                if [ "$ws_id" -ge "$pstart" ] && [ "$ws_id" -le "$pend" ]; then
-                    proj_name="$pname"
-                    screen_num=$((ws_id - pstart + 1))
-                    break
-                fi
-            done < "$PROJECTS_FILE"
+    menu-json)
+        menu_build_json
+        ;;
 
-            [ -z "$proj_name" ] && proj_name="untracked" && screen_num="$ws_id"
-
-            # Check for custom name
-            custom_name=""
-            if [ -f "$NAMES_FILE" ]; then
-                custom_name=$(grep "^${addr}	" "$NAMES_FILE" | cut -f2)
-            fi
-
-            display_name="${custom_name:-$class}"
-            items+="${display_name} | ${title} · ${proj_name} screen ${screen_num}\n"
-        done < <(hyprctl -j clients 2>/dev/null | jq -c '.[]')
-
-        [ -z "$items" ] && exit 0
-
-        choice=$(printf "%b" "$items" | walker -d -p "  Find window:")
-        [ -z "$choice" ] && exit 0
-
-        # Extract project and screen from the choice
-        proj=$(echo "$choice" | grep -oP '· \K[^ ]+(?= screen)')
-        scr=$(echo "$choice" | grep -oP 'screen \K[0-9]+')
-
-        if [ -n "$proj" ] && [ -n "$scr" ]; then
-            # Switch all monitors to the target project
-            activate_project "$proj"
-
-            # Then go to the specific screen and focus the window
-            proj_start=$(get_start "$proj")
-            if [ -n "$proj_start" ]; then
-                ws=$((proj_start + scr - 1))
-                hyprctl dispatch workspace "$ws" > /dev/null
-
-                # Find and focus the matching window by title from choice
-                win_title=$(echo "$choice" | sed 's/^[^|]*| //' | sed 's/ · .*//')
-                hyprctl -j clients | jq -r \
-                    ".[] | select(.workspace.id == $ws) | select(.title | startswith(\"$(echo "$win_title" | sed 's/"/\\"/g' | head -c30)\")) | .address" | \
-                    head -1 | xargs -I{} hyprctl dispatch focuswindow "address:{}" > /dev/null 2>&1
-
-                signal_waybar
-            fi
-        fi
+    menu-open)
+        [ -z "$2" ] && exit 1
+        menu_open_value "$2"
         ;;
 
     waybar)

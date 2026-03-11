@@ -16,6 +16,20 @@ else
     warn "Script not found, skipping"
 fi
 
+if [ -f ~/.local/bin/hypr-project-menu-json ]; then
+    rm ~/.local/bin/hypr-project-menu-json
+    ok "Removed ~/.local/bin/hypr-project-menu-json"
+else
+    warn "Helper script not found, skipping"
+fi
+
+if [ -f ~/.config/elephant/menus/hyprspotlight.lua ]; then
+    rm ~/.config/elephant/menus/hyprspotlight.lua
+    ok "Removed ~/.config/elephant/menus/hyprspotlight.lua"
+else
+    warn "Elephant menu not found, skipping"
+fi
+
 # --- 2. Remove patched sections from Hyprland bindings ---
 BINDINGS_FILE="$HOME/.config/hypr/bindings.conf"
 if [ -f "$BINDINGS_FILE" ] && grep -q "$MARKER" "$BINDINGS_FILE"; then
@@ -47,4 +61,5 @@ fi
 
 echo ""
 ok "hypr-project uninstalled!"
+echo "Run omarchy-restart-walker to unload the spotlight menu."
 echo "Run omarchy-restart-waybar to apply changes."
