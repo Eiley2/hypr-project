@@ -91,6 +91,13 @@ def action_keywords(*parts):
     for part in normalized_parts:
         if part not in keywords:
             keywords.append(part)
+    for i, left in enumerate(normalized_parts):
+        for j, right in enumerate(normalized_parts):
+            if i == j:
+                continue
+            pair = f"{left} {right}"
+            if pair not in keywords:
+                keywords.append(pair)
     joined = " ".join(normalized_parts)
     if joined and joined not in keywords:
         keywords.append(joined)
