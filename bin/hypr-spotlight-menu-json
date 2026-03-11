@@ -85,6 +85,21 @@ def project_label(name: str, project_icons):
     return f"{icon} {name}".strip() if icon else name
 
 
+def action_keywords(*parts):
+    keywords = []
+    normalized_parts = [part.strip().lower() for part in parts if part and part.strip()]
+    for part in normalized_parts:
+        if part not in keywords:
+            keywords.append(part)
+    joined = " ".join(normalized_parts)
+    if joined and joined not in keywords:
+        keywords.append(joined)
+    reversed_joined = " ".join(reversed(normalized_parts))
+    if reversed_joined and reversed_joined not in keywords:
+        keywords.append(reversed_joined)
+    return keywords
+
+
 def desktop_keys(desktop_path: str, app_name: str, startup_wmclass: str):
     desktop_id = Path(desktop_path).stem
     return [startup_wmclass, desktop_id, desktop_id.split(".")[-1], app_name]
@@ -287,6 +302,7 @@ def build_entries():
                         "Subtext": window_text,
                         "Value": f"window-action:{current_action_payload('close')}",
                         "Icon": desktop_icon.get(desktop, "window-close"),
+                        "Keywords": action_keywords(project_name, "close", "current window"),
                         "_project": project_name,
                         "_type_rank": 1,
                     },
@@ -295,6 +311,7 @@ def build_entries():
                         "Subtext": window_text,
                         "Value": f"window-action:{current_action_payload('float')}",
                         "Icon": desktop_icon.get(desktop, "preferences-system-windows"),
+                        "Keywords": action_keywords(project_name, "float", "floating", "current window"),
                         "_project": project_name,
                         "_type_rank": 1,
                     },
@@ -303,6 +320,7 @@ def build_entries():
                         "Subtext": window_text,
                         "Value": f"window-action:{current_action_payload('fullscreen')}",
                         "Icon": desktop_icon.get(desktop, "view-fullscreen"),
+                        "Keywords": action_keywords(project_name, "fullscreen", "current window"),
                         "_project": project_name,
                         "_type_rank": 1,
                     },
@@ -319,6 +337,7 @@ def build_entries():
                         "Subtext": f"{window_text} · keep screen {screen_num}",
                         "Value": f"window-action:{current_action_payload('move-project', target_name)}",
                         "Icon": "folder-move",
+                        "Keywords": action_keywords(target_name, "move", "current window", "move to"),
                         "_project": project_name,
                         "_type_rank": 1,
                     }
@@ -357,9 +376,13 @@ def emit_lua(entries):
     chunks = ["{"]
     for entry in entries:
         parts = ["{"]
-        for key in ("Text", "Subtext", "Value", "Icon"):
+        for key in ("Text", "Subtext", "Value", "Icon", "Keywords"):
             if key in entry and entry[key] is not None:
-                parts.append(f"{key}={lua_quote(str(entry[key]))},")
+                if key == "Keywords":
+                    values = ",".join(lua_quote(str(item)) for item in entry[key])
+                    parts.append(f"{key}={{{values}}},")
+                else:
+                    parts.append(f"{key}={lua_quote(str(entry[key]))},")
         parts.append("},")
         chunks.append("".join(parts))
     chunks.append("}")
